@@ -76,7 +76,7 @@ export async function fetchSwapEvents(limit: number, offset: number, retryCount 
 /**
  * Fetches all swap events with pagination
  */
-export async function fetchAllSwapEvents(maxEvents = Infinity): Promise<SwapEvent[]> {
+export async function fetchAllSwapEvents(maxEvents = Infinity, concurrency = 5): Promise<SwapEvent[]> {
   const batchSize = 10000;
   let offset = 0;
   let allEvents: SwapEvent[] = [];
@@ -86,25 +86,48 @@ export async function fetchAllSwapEvents(maxEvents = Infinity): Promise<SwapEven
   console.log('Starting to fetch all swap events from Dune');
   
   while (hasMore && allEvents.length < maxEvents) {
-    const events = await fetchSwapEvents(batchSize, offset);
+    // Create a batch of parallel requests
+    const fetchPromises: Promise<SwapEvent[]>[] = [];
+    const batchOffsets: number[] = [];
     
-    if (events.length === 0) {
-      consecutiveEmptyPages++;
-      // If we get 2 empty pages in a row, assume we've reached the end
-      if (consecutiveEmptyPages >= 2) {
-        hasMore = false;
-      }
-    } else {
-      consecutiveEmptyPages = 0;
-      allEvents = [...allEvents, ...events];
-      offset += events.length;
-      console.log(`Fetched ${events.length} events, total: ${allEvents.length}`);
+    for (let i = 0; i < concurrency && hasMore && (allEvents.length + batchSize * fetchPromises.length) < maxEvents; i++) {
+      const currentOffset = offset + (i * batchSize);
+      fetchPromises.push(fetchSwapEvents(batchSize, currentOffset));
+      batchOffsets.push(currentOffset);
+    }
+    
+    console.log(`Executing ${fetchPromises.length} parallel requests starting at offset ${offset}`);
+    
+    // Wait for all requests to complete
+    const batchResults = await Promise.all(fetchPromises);
+    
+    // Process results
+    let batchEventCount = 0;
+    for (let i = 0; i < batchResults.length; i++) {
+      const events = batchResults[i];
+      batchEventCount += events.length;
       
-      // If we got fewer events than requested, assume we've reached the end
-      if (events.length < batchSize) {
-        hasMore = false;
+      if (events.length === 0) {
+        consecutiveEmptyPages++;
+        // If we get 2 empty pages, assume we've reached the end
+        if (consecutiveEmptyPages >= 2) {
+          hasMore = false;
+        }
+      } else {
+        consecutiveEmptyPages = 0;
+        allEvents = [...allEvents, ...events];
+        
+        // If we got fewer events than requested, assume we've reached the end
+        if (events.length < batchSize) {
+          hasMore = false;
+        }
       }
     }
+    
+    console.log(`Fetched ${batchEventCount} events in parallel, total: ${allEvents.length}`);
+    
+    // Update offset for next batch
+    offset += batchSize * fetchPromises.length;
     
     // Enforce maxEvents limit
     if (allEvents.length >= maxEvents) {

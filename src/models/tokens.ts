@@ -14,6 +14,7 @@ export interface TokenInfoResponseDto {
     currentPrice: number | null;
     priceUpdatedAt: string;
     last24hVariation: number | null;
+    priceSource?: 'coingecko' | 'dexscreener' | null;
     info: TokenInfoResponseDto;
   }
   export interface PageMetaDto {

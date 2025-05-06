@@ -12,6 +12,7 @@ let cachedTokenData: TokenResponseDto[] = [];
 let lastFetchTime: number = 0;
 const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes in milliseconds
 let metadataLoaded = false;
+let isCurrentlyLoading = false; // Flag to track if data is currently being loaded
 
 // Status tracking
 let lastFetchStatus = {
@@ -20,6 +21,7 @@ let lastFetchStatus = {
   error: null as Error | null,
   duneEventsCount: 0,
   dexScreenerTokensCount: 0,
+  coinGeckoTokensCount: 0,
   totalTokensProcessed: 0
 };
 
@@ -31,6 +33,12 @@ const shouldRefreshCache = (): boolean => {
 
 // Function to fetch and process all token data
 async function fetchAndProcessTokenData() {
+  if (isCurrentlyLoading) {
+    console.log('Data is already being loaded, waiting for completion...');
+    return cachedTokenData; // Return current data while loading
+  }
+
+  isCurrentlyLoading = true;
   // Reset status
   lastFetchStatus = {
     success: false,
@@ -38,6 +46,7 @@ async function fetchAndProcessTokenData() {
     error: null,
     duneEventsCount: 0,
     dexScreenerTokensCount: 0,
+    coinGeckoTokensCount: 0,
     totalTokensProcessed: 0
   };
 
@@ -128,11 +137,18 @@ async function fetchAndProcessTokenData() {
     // Fetch prices
     const prices = await fetchPrices(addresses);
     lastFetchStatus.dexScreenerTokensCount = Object.keys(prices).length;
-    console.log(`Fetched prices for ${Object.keys(prices).length} tokens from DexScreener`);
+
+    // Count how many tokens have CoinGecko prices
+    lastFetchStatus.coinGeckoTokensCount = Object.values(prices)
+      .filter(priceInfo => priceInfo.source === 'coingecko')
+      .length;
+
+    console.log(`Fetched prices for ${Object.keys(prices).length} tokens (${lastFetchStatus.coinGeckoTokensCount} from CoinGecko)`);
 
     // Source attribution stats
     let duneContributionCount = 0;
     let dexScreenerContributionCount = 0;
+    let coinGeckoContributionCount = 0;
     let bothSourcesCount = 0;
 
     // Store rich token data for internal use (not exposed in API)
@@ -155,7 +171,8 @@ async function fetchAndProcessTokenData() {
         volume24h: 0,
         swapAmount24h: 0,
         lastSwapTime: null,
-        pairs: []
+        pairs: [],
+        source: null
       };
       
       // Combine swap data from Dune with data from DexScreener
@@ -167,11 +184,14 @@ async function fetchAndProcessTokenData() {
       // Debug: Log source attribution for this token
       const hasDuneData = swapInfo.sells > 0 || swapInfo.buys > 0;
       const hasDexScreenerData = priceInfo.usd !== null || priceInfo.sells > 0 || priceInfo.buys > 0;
+      const hasCoinGeckoPrice = priceInfo.source === 'coingecko';
       
-      if (hasDuneData && hasDexScreenerData) {
+      if (hasDuneData && (hasDexScreenerData || hasCoinGeckoPrice)) {
         bothSourcesCount++;
       } else if (hasDuneData) {
         duneContributionCount++;
+      } else if (hasCoinGeckoPrice) {
+        coinGeckoContributionCount++;
       } else if (hasDexScreenerData) {
         dexScreenerContributionCount++;
       }
@@ -185,7 +205,8 @@ async function fetchAndProcessTokenData() {
           pairsCount: duneExtendedData.get(normalizedAddr)?.pairs.size || 0,
           totalAmountUsd: duneExtendedData.get(normalizedAddr)?.totalAmountUsd || 0
         } : 'No data',
-        dexScreener: hasDexScreenerData ? {
+        priceSource: priceInfo.source || 'unknown',
+        priceData: priceInfo.usd !== null ? {
           price: priceInfo.usd,
           priceChange24h: priceInfo.usd_24h_change,
           sells: priceInfo.sells || 0,
@@ -193,7 +214,7 @@ async function fetchAndProcessTokenData() {
           volume24h: priceInfo.volume24h || 0,
           swapAmount24h: priceInfo.swapAmount24h || 0,
           pairsCount: priceInfo.pairs?.length || 0
-        } : 'No data'
+        } : 'No price data'
       });
       
       // Combine additional data for internal use
@@ -221,6 +242,7 @@ async function fetchAndProcessTokenData() {
         currentPrice: priceInfo.usd,
         priceUpdatedAt: priceInfo.updatedAt || new Date().toISOString(),
         last24hVariation: priceInfo.usd_24h_change ?? 0,
+        priceSource: priceInfo.source || null,
         info: {
           sells: totalSells,
           buys: totalBuys,
@@ -233,8 +255,9 @@ async function fetchAndProcessTokenData() {
     console.log('------- DATA SOURCE SUMMARY -------');
     console.log(`Tokens with Dune data only: ${duneContributionCount}`);
     console.log(`Tokens with DexScreener data only: ${dexScreenerContributionCount}`);
-    console.log(`Tokens with data from both sources: ${bothSourcesCount}`);
-    console.log(`Tokens with no data from either source: ${addresses.length - (duneContributionCount + dexScreenerContributionCount + bothSourcesCount)}`);
+    console.log(`Tokens with CoinGecko price data: ${coinGeckoContributionCount}`);
+    console.log(`Tokens with data from multiple sources: ${bothSourcesCount}`);
+    console.log(`Tokens with no data from any source: ${addresses.length - (duneContributionCount + dexScreenerContributionCount + coinGeckoContributionCount + bothSourcesCount)}`);
     console.log('-----------------------------------');
     console.log(`Cache refreshed at: ${new Date().toISOString()}`);
 
@@ -247,6 +270,8 @@ async function fetchAndProcessTokenData() {
     console.error('Error in fetchAndProcessTokenData:', error);
     lastFetchStatus.error = error as Error;
     throw error;
+  } finally {
+    isCurrentlyLoading = false;
   }
 }
 
@@ -254,18 +279,22 @@ async function fetchAndProcessTokenData() {
 fetchAndProcessTokenData().then(data => {
   cachedTokenData = data;
   lastFetchTime = Date.now();
+  isCurrentlyLoading = false;
   console.log('Initial token data cache populated');
 }).catch(error => {
   console.error('Failed to initialize token data cache:', error);
+  isCurrentlyLoading = false;
 });
 
 tokensRouter.get('/tokens', async (req, res) => {
   try {
     // Check if we need to refresh the cache
-    if (shouldRefreshCache()) {
+    if (shouldRefreshCache() && !isCurrentlyLoading) {
       console.log('Cache expired, refreshing token data...');
       cachedTokenData = await fetchAndProcessTokenData();
       lastFetchTime = Date.now();
+    } else if (isCurrentlyLoading) {
+      console.log('Data refresh already in progress, using current cached data');
     } else {
       console.log('Using cached token data, last refreshed:', new Date(lastFetchTime).toISOString());
     }
@@ -320,8 +349,8 @@ tokensRouter.get('/tokens', async (req, res) => {
         const orderKey = query.order as keyof TokenResponseDto;
         if (!orderKey) return 0;
         
-        const valA = a[orderKey];
-        const valB = b[orderKey];
+        const valA: any = a[orderKey];
+        const valB: any = b[orderKey];
         
         if (valA === null) return 1;
         if (valB === null) return -1;
@@ -374,9 +403,22 @@ tokensRouter.get('/tokens/status', async (req, res) => {
       error: lastFetchStatus.error ? lastFetchStatus.error.message : null,
       dune_events_count: lastFetchStatus.duneEventsCount,
       dexscreener_tokens_count: lastFetchStatus.dexScreenerTokensCount,
+      coingecko_tokens_count: lastFetchStatus.coinGeckoTokensCount,
       total_tokens_processed: lastFetchStatus.totalTokensProcessed
     },
-    health: lastFetchStatus.success ? 'healthy' : 'degraded'
+    health: lastFetchStatus.success ? 'healthy' : 'degraded',
+    price_sources: {
+      coingecko: {
+        enabled: true,
+        priority: 1,
+        description: "Primary source for token prices, called individually per token"
+      },
+      dexscreener: {
+        enabled: true, 
+        priority: 2,
+        description: "Fallback source when CoinGecko data is unavailable"
+      }
+    }
   };
   
   res.json(status);
@@ -388,10 +430,12 @@ tokensRouter.get('/tokens/top-traded', async (req, res) => {
     // Force refresh if requested
     const forceRefresh = req.query.refresh === 'true';
     
-    if (forceRefresh || shouldRefreshCache()) {
+    if ((forceRefresh || shouldRefreshCache()) && !isCurrentlyLoading) {
       console.log('Refreshing token data for top-traded endpoint...');
       cachedTokenData = await fetchAndProcessTokenData();
       lastFetchTime = Date.now();
+    } else if (isCurrentlyLoading) {
+      console.log('Data refresh already in progress, using current cached data for top-traded endpoint');
     }
     
     // Parse query parameters
