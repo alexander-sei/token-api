@@ -4,7 +4,7 @@ export interface TokenMetadata { contract_address: string; symbol: string; name:
 let tokenMetadata: TokenMetadata[] = [];
 export function loadTokenMetadata(): Promise<void> {
   return new Promise((resolve, reject) => {
-    fs.createReadStream('data/all_sei_tokens_with_names.csv')
+    fs.createReadStream('data/sei_all_tokens_no_dup_CA_or_name.csv')
       .pipe(csv())
       .on('data', row => {
         tokenMetadata.push({

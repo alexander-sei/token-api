@@ -76,7 +76,7 @@ export async function fetchSwapEvents(limit: number, offset: number, retryCount 
 /**
  * Fetches all swap events with pagination
  */
-export async function fetchAllSwapEvents(maxEvents = Infinity, concurrency = 5): Promise<SwapEvent[]> {
+export async function fetchAllSwapEvents(maxEvents = Infinity, concurrency = 10): Promise<SwapEvent[]> {
   const batchSize = 10000;
   let offset = 0;
   let allEvents: SwapEvent[] = [];

@@ -7,10 +7,16 @@ import { TokenResponseDto, TokenPageDto, TokensQueryParams, OrderColumns } from 
 
 export const tokensRouter = express.Router();
 
+// Configuration
+const CONFIG = {
+  FILTER_TOKENS_WITHOUT_DATA: true, // Set to false to include all tokens, even those with no data
+  CACHE_DURATION: 5 * 60 * 1000 // 5 minutes in milliseconds
+};
+
 // Cache variables
 let cachedTokenData: TokenResponseDto[] = [];
 let lastFetchTime: number = 0;
-const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes in milliseconds
+const CACHE_DURATION = CONFIG.CACHE_DURATION;
 let metadataLoaded = false;
 let isCurrentlyLoading = false; // Flag to track if data is currently being loaded
 
@@ -242,7 +248,6 @@ async function fetchAndProcessTokenData() {
         currentPrice: priceInfo.usd,
         priceUpdatedAt: priceInfo.updatedAt || new Date().toISOString(),
         last24hVariation: priceInfo.usd_24h_change ?? 0,
-        priceSource: priceInfo.source || null,
         info: {
           sells: totalSells,
           buys: totalBuys,
@@ -251,21 +256,44 @@ async function fetchAndProcessTokenData() {
       };
     });
 
+    // Filter out tokens with no data from any source
+    let filteredTokenData = allTokenData;
+    if (CONFIG.FILTER_TOKENS_WITHOUT_DATA) {
+      filteredTokenData = allTokenData.filter(token => {
+        const addr = token.contractAddress.toLowerCase();
+        const hasDuneData = grouped.has(addr) && (grouped.get(addr)!.sells > 0 || grouped.get(addr)!.buys > 0);
+        const hasPriceData = prices[addr] && (
+          prices[addr].usd !== null || 
+          prices[addr].sells > 0 || 
+          prices[addr].buys > 0
+        );
+        return hasDuneData || hasPriceData;
+      });
+      console.log(`Filtered out ${allTokenData.length - filteredTokenData.length} tokens with no data`);
+    } else {
+      console.log("Token filtering is disabled, keeping all tokens");
+    }
+
     // Log data source summary
     console.log('------- DATA SOURCE SUMMARY -------');
     console.log(`Tokens with Dune data only: ${duneContributionCount}`);
     console.log(`Tokens with DexScreener data only: ${dexScreenerContributionCount}`);
     console.log(`Tokens with CoinGecko price data: ${coinGeckoContributionCount}`);
     console.log(`Tokens with data from multiple sources: ${bothSourcesCount}`);
-    console.log(`Tokens with no data from any source: ${addresses.length - (duneContributionCount + dexScreenerContributionCount + coinGeckoContributionCount + bothSourcesCount)}`);
+    if (CONFIG.FILTER_TOKENS_WITHOUT_DATA) {
+      console.log(`Tokens with no data (filtered out): ${allTokenData.length - filteredTokenData.length}`);
+    } else {
+      console.log(`Tokens with no data: ${addresses.length - (duneContributionCount + dexScreenerContributionCount + coinGeckoContributionCount + bothSourcesCount)}`);
+    }
+    console.log(`Total tokens after filtering: ${filteredTokenData.length}`);
     console.log('-----------------------------------');
     console.log(`Cache refreshed at: ${new Date().toISOString()}`);
 
     // Update status
     lastFetchStatus.success = true;
-    lastFetchStatus.totalTokensProcessed = allTokenData.length;
+    lastFetchStatus.totalTokensProcessed = filteredTokenData.length;
     
-    return allTokenData;
+    return filteredTokenData;
   } catch (error) {
     console.error('Error in fetchAndProcessTokenData:', error);
     lastFetchStatus.error = error as Error;
@@ -404,7 +432,9 @@ tokensRouter.get('/tokens/status', async (req, res) => {
       dune_events_count: lastFetchStatus.duneEventsCount,
       dexscreener_tokens_count: lastFetchStatus.dexScreenerTokensCount,
       coingecko_tokens_count: lastFetchStatus.coinGeckoTokensCount,
-      total_tokens_processed: lastFetchStatus.totalTokensProcessed
+      total_tokens_processed: lastFetchStatus.totalTokensProcessed,
+      tokens_filtered_out: lastFetchStatus.totalTokensProcessed > 0 ? 
+        lastFetchStatus.totalTokensProcessed - cachedTokenData.length : 0
     },
     health: lastFetchStatus.success ? 'healthy' : 'degraded',
     price_sources: {
