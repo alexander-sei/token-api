@@ -3,7 +3,7 @@ import { Request } from 'express';
 export interface TokenInfoResponseDto {
     sells: number;
     buys: number;
-    bondedAt: string | null;
+    swaps: number;
   }
   export interface TokenResponseDto {
     name: string;
@@ -27,24 +27,23 @@ export interface TokenInfoResponseDto {
     meta: PageMetaDto;
   }
 
-  export enum OrderColumns {
-    NAME = 'name',
-    SYMBOL = 'symbol',
-    DECIMALS = 'decimals',
-    CONTRACT_ADDRESS = 'contractAddress',
-    PRICE = 'currentPrice',
-    PRICE_UPDATED_AT = 'priceUpdatedAt',
-    CREATED_AT = 'createdAt',
-    UPDATED_AT = 'updatedAt',
-    VARIATION = 'last24hVariation'
-  }
+  export type OrderColumns = 
+    | 'name'
+    | 'symbol'
+    | 'decimals'
+    | 'contractAddress'
+    | 'currentPrice'
+    | 'priceUpdatedAt'
+    | 'createdAt'
+    | 'updatedAt'
+    | 'last24hVariation'
+    | 'swaps'
+    | 'sells'
+    | 'buys';
 
   export interface TokensQueryParams {
     page?: number;
     limit?: number;
-    isBonded?: boolean;
-    isMostSwapped?: boolean;
-    new?: boolean;
     addresses?: string;
     order?: OrderColumns;
     sort?: 'asc' | 'desc';

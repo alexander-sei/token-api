@@ -243,15 +243,15 @@ async function fetchAndProcessTokenData() {
         name: meta?.name || addr,
         symbol: meta?.symbol || addr,
         decimals: meta?.decimals || 0,
-        logo: '', // Default empty logo
+        logo: meta?.logo || '', // Use logo from metadata if available
         contractAddress: addr,
         currentPrice: priceInfo.usd,
         priceUpdatedAt: priceInfo.updatedAt || new Date().toISOString(),
-        last24hVariation: priceInfo.usd_24h_change ?? 0,
+        last24hVariation: priceInfo.usd_24h_change ?? null,
         info: {
           sells: totalSells,
           buys: totalBuys,
-          bondedAt: null // This would need to be updated with actual bonding data if available
+          swaps: totalSells + totalBuys
         }
       };
     });
@@ -343,9 +343,6 @@ tokensRouter.get('/tokens', async (req, res) => {
     const query: TokensQueryParams = {
       page: Number(req.query.page) || 1,
       limit: Math.min(Number(req.query.limit) || 50, 100),
-      isBonded: req.query.isBonded === 'true',
-      isMostSwapped: req.query.isMostSwapped === 'true',
-      new: req.query.new === 'true',
       addresses: req.query.addresses as string,
       order: req.query.order as OrderColumns,
       sort: (req.query.sort as 'asc' | 'desc') || 'desc'
@@ -365,41 +362,16 @@ tokensRouter.get('/tokens', async (req, res) => {
       data = data.filter(token => addressFilter.includes(token.contractAddress.toLowerCase()));
     }
 
-    // Apply filters based on query parameters
-    if (query.isBonded) {
-      data = data.filter(token => token.info.bondedAt !== null);
-    }
-
-    if (query.isMostSwapped) {
-      // Calculate total swaps for each token
-      const tokenSwaps = data.map(token => ({
-        token,
-        totalSwaps: token.info.buys + token.info.sells
-      }));
-
-      // Sort by swap count
-      tokenSwaps.sort((a, b) => b.totalSwaps - a.totalSwaps);
-      
-      // Take only the top 25% most swapped tokens (at least 1)
-      const topCount = Math.max(1, Math.ceil(tokenSwaps.length * 0.25));
-      data = tokenSwaps.slice(0, topCount).map(item => item.token);
-    }
-
-    if (query.new) {
-      // Filter tokens created/updated within the last 7 days
-      const sevenDaysAgo = new Date();
-      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-      
-      data = data.filter(token => {
-        if (!token.priceUpdatedAt) return false;
-        const updatedAt = new Date(token.priceUpdatedAt);
-        return updatedAt >= sevenDaysAgo;
-      });
-    }
-
     // Apply ordering if specified
     if (query.order) {
       data = data.sort((a, b) => {
+        // Handle nested info properties
+        if (query.order === 'swaps' || query.order === 'sells' || query.order === 'buys') {
+          const valA = a.info[query.order];
+          const valB = b.info[query.order];
+          return query.sort === 'asc' ? (valA < valB ? -1 : 1) : (valA > valB ? -1 : 1);
+        }
+        
         const orderKey = query.order as keyof TokenResponseDto;
         if (!orderKey) return 0;
         
