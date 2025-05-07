@@ -314,15 +314,27 @@ fetchAndProcessTokenData().then(data => {
   isCurrentlyLoading = false;
 });
 
-tokensRouter.get('/tokens', async (req, res) => {
+// Set up automatic refresh every 5 minutes
+setInterval(async () => {
   try {
-    // Check if we need to refresh the cache
-    if (shouldRefreshCache() && !isCurrentlyLoading) {
-      console.log('Cache expired, refreshing token data...');
+    if (!isCurrentlyLoading) {
+      console.log('Auto refresh: refreshing token data...');
       cachedTokenData = await fetchAndProcessTokenData();
       lastFetchTime = Date.now();
-    } else if (isCurrentlyLoading) {
-      console.log('Data refresh already in progress, using current cached data');
+      console.log('Auto refresh completed at:', new Date().toISOString());
+    } else {
+      console.log('Auto refresh: data refresh already in progress, skipping');
+    }
+  } catch (error) {
+    console.error('Auto refresh: error refreshing token data:', error);
+  }
+}, CACHE_DURATION);
+
+tokensRouter.get('/tokens', async (req, res) => {
+  try {
+    // With auto-refresh enabled, we just use the cached data
+    if (isCurrentlyLoading) {
+      console.log('Data refresh in progress, using current cached data');
     } else {
       console.log('Using cached token data, last refreshed:', new Date(lastFetchTime).toISOString());
     }
@@ -359,15 +371,29 @@ tokensRouter.get('/tokens', async (req, res) => {
     }
 
     if (query.isMostSwapped) {
-      data = data.sort((a, b) => (b.info.buys + b.info.sells) - (a.info.buys + a.info.sells));
+      // Calculate total swaps for each token
+      const tokenSwaps = data.map(token => ({
+        token,
+        totalSwaps: token.info.buys + token.info.sells
+      }));
+
+      // Sort by swap count
+      tokenSwaps.sort((a, b) => b.totalSwaps - a.totalSwaps);
+      
+      // Take only the top 25% most swapped tokens (at least 1)
+      const topCount = Math.max(1, Math.ceil(tokenSwaps.length * 0.25));
+      data = tokenSwaps.slice(0, topCount).map(item => item.token);
     }
 
     if (query.new) {
-      // Sort by most recent priceUpdatedAt
-      data = data.sort((a, b) => {
-        const dateA = a.priceUpdatedAt ? new Date(a.priceUpdatedAt).getTime() : 0;
-        const dateB = b.priceUpdatedAt ? new Date(b.priceUpdatedAt).getTime() : 0;
-        return dateB - dateA;
+      // Filter tokens created/updated within the last 7 days
+      const sevenDaysAgo = new Date();
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+      
+      data = data.filter(token => {
+        if (!token.priceUpdatedAt) return false;
+        const updatedAt = new Date(token.priceUpdatedAt);
+        return updatedAt >= sevenDaysAgo;
       });
     }
 
@@ -457,15 +483,11 @@ tokensRouter.get('/tokens/status', async (req, res) => {
 // Add top-traded endpoint
 tokensRouter.get('/tokens/top-traded', async (req, res) => {
   try {
-    // Force refresh if requested
-    const forceRefresh = req.query.refresh === 'true';
-    
-    if ((forceRefresh || shouldRefreshCache()) && !isCurrentlyLoading) {
-      console.log('Refreshing token data for top-traded endpoint...');
-      cachedTokenData = await fetchAndProcessTokenData();
-      lastFetchTime = Date.now();
-    } else if (isCurrentlyLoading) {
-      console.log('Data refresh already in progress, using current cached data for top-traded endpoint');
+    // With auto-refresh enabled, we just use the cached data
+    if (isCurrentlyLoading) {
+      console.log('Data refresh in progress, using current cached data for top-traded endpoint');
+    } else {
+      console.log('Using cached token data for top-traded endpoint, last refreshed:', new Date(lastFetchTime).toISOString());
     }
     
     // Parse query parameters
