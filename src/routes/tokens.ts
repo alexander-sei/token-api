@@ -10,13 +10,16 @@ export const tokensRouter = express.Router();
 // Configuration
 const CONFIG = {
   FILTER_TOKENS_WITHOUT_DATA: true, // Set to false to include all tokens, even those with no data
-  CACHE_DURATION: 5 * 60 * 1000 // 5 minutes in milliseconds
+  CACHE_DURATION: 5 * 60 * 1000, // 5 minutes in milliseconds
+  DUNE_REFRESH_INTERVAL: 6 * 60 * 60 * 1000 // 6 hours in milliseconds
 };
 
 // Cache variables
 let cachedTokenData: TokenResponseDto[] = [];
 let lastFetchTime: number = 0;
+let lastDuneFetchTime: number = 0;
 const CACHE_DURATION = CONFIG.CACHE_DURATION;
+const DUNE_REFRESH_INTERVAL = CONFIG.DUNE_REFRESH_INTERVAL;
 let metadataLoaded = false;
 let isCurrentlyLoading = false; // Flag to track if data is currently being loaded
 
@@ -37,8 +40,14 @@ const shouldRefreshCache = (): boolean => {
   return now - lastFetchTime > CACHE_DURATION || cachedTokenData.length === 0;
 };
 
+// Function to check if Dune data needs refresh
+const shouldRefreshDuneData = (): boolean => {
+  const now = Date.now();
+  return now - lastDuneFetchTime > DUNE_REFRESH_INTERVAL || lastDuneFetchTime === 0;
+};
+
 // Function to fetch and process all token data
-async function fetchAndProcessTokenData() {
+async function fetchAndProcessTokenData(forceDuneRefresh: boolean = false) {
   if (isCurrentlyLoading) {
     console.log('Data is already being loaded, waiting for completion...');
     return cachedTokenData; // Return current data while loading
@@ -65,82 +74,97 @@ async function fetchAndProcessTokenData() {
 
     console.log('----------------- DATA SOURCE DEBUG -----------------');
     
-    // Fetch all swap events with pagination
-    const events = await fetchAllSwapEvents();
-    lastFetchStatus.duneEventsCount = events.length;
-    console.log(`Fetched ${events.length} swap events from Dune`);
-
-    // Store additional Dune data for internal use
-    const duneExtendedData = new Map<string, { 
+    // Store grouped events data for token addresses
+    let grouped = new Map<string, { sells: number; buys: number }>();
+    let duneExtendedData = new Map<string, { 
       totalAmountUsd: number;
       lastSwapTime: string | null;
       pairs: Set<string>;
     }>();
+    
+    // Only fetch Dune data if it's time to refresh or forced
+    if (shouldRefreshDuneData() || forceDuneRefresh) {
+      console.log('Fetching fresh Dune data...');
+      // Fetch all swap events with pagination
+      const events = await fetchAllSwapEvents();
+      lastFetchStatus.duneEventsCount = events.length;
+      console.log(`Fetched ${events.length} swap events from Dune`);
+      
+      // Group events by token address to compute sells/buys
+      grouped = new Map<string, { sells: number; buys: number }>();
+      duneExtendedData = new Map<string, { 
+        totalAmountUsd: number;
+        lastSwapTime: string | null;
+        pairs: Set<string>;
+      }>();
+      
+      for (const e of events) {
+        // Validate all required fields
+        if (!e.token_sold_address || !e.token_bought_address || !e.block_time) {
+          console.log('Skipping event with missing required fields');
+          continue;
+        }
 
-    // Group events by token address to compute sells/buys
-    const grouped = new Map<string, { sells: number; buys: number }>();
-    for (const e of events) {
-      // Validate all required fields
-      if (!e.token_sold_address || !e.token_bought_address || !e.block_time) {
-        console.log('Skipping event with missing required fields');
-        continue;
-      }
+        // Normalize addresses to lowercase and trim whitespace
+        const sellAddr = e.token_sold_address.toLowerCase().trim();
+        const buyAddr = e.token_bought_address.toLowerCase().trim();
+        
+        // Update sell/buy counts
+        const sellData = grouped.get(sellAddr) || { sells: 0, buys: 0 };
+        sellData.sells += 1;
+        grouped.set(sellAddr, sellData);
 
-      // Normalize addresses to lowercase and trim whitespace
-      const sellAddr = e.token_sold_address.toLowerCase().trim();
-      const buyAddr = e.token_bought_address.toLowerCase().trim();
-      
-      // Update sell/buy counts
-      const sellData = grouped.get(sellAddr) || { sells: 0, buys: 0 };
-      sellData.sells += 1;
-      grouped.set(sellAddr, sellData);
-
-      const buyData = grouped.get(buyAddr) || { sells: 0, buys: 0 };
-      buyData.buys += 1;
-      grouped.set(buyAddr, buyData);
-      
-      // Collect extended data for internal use
-      // Sell token
-      let sellExtData = duneExtendedData.get(sellAddr) || { 
-        totalAmountUsd: 0, 
-        lastSwapTime: null, 
-        pairs: new Set<string>() 
-      };
-      
-      // Use default 0 if amount_usd is undefined or null
-      sellExtData.totalAmountUsd += Number(e.amount_usd) || 0;
-      if (!sellExtData.lastSwapTime || new Date(e.block_time) > new Date(sellExtData.lastSwapTime)) {
-        sellExtData.lastSwapTime = e.block_time;
+        const buyData = grouped.get(buyAddr) || { sells: 0, buys: 0 };
+        buyData.buys += 1;
+        grouped.set(buyAddr, buyData);
+        
+        // Collect extended data for internal use
+        // Sell token
+        let sellExtData = duneExtendedData.get(sellAddr) || { 
+          totalAmountUsd: 0, 
+          lastSwapTime: null, 
+          pairs: new Set<string>() 
+        };
+        
+        // Use default 0 if amount_usd is undefined or null
+        sellExtData.totalAmountUsd += Number(e.amount_usd) || 0;
+        if (!sellExtData.lastSwapTime || new Date(e.block_time) > new Date(sellExtData.lastSwapTime)) {
+          sellExtData.lastSwapTime = e.block_time;
+        }
+        if (e.token_pair) {
+          sellExtData.pairs.add(e.token_pair);
+        }
+        duneExtendedData.set(sellAddr, sellExtData);
+        
+        // Buy token
+        let buyExtData = duneExtendedData.get(buyAddr) || { 
+          totalAmountUsd: 0, 
+          lastSwapTime: null, 
+          pairs: new Set<string>() 
+        };
+        
+        buyExtData.totalAmountUsd += Number(e.amount_usd) || 0;
+        if (!buyExtData.lastSwapTime || new Date(e.block_time) > new Date(buyExtData.lastSwapTime)) {
+          buyExtData.lastSwapTime = e.block_time;
+        }
+        if (e.token_pair) {
+          buyExtData.pairs.add(e.token_pair);
+        }
+        duneExtendedData.set(buyAddr, buyExtData);
       }
-      if (e.token_pair) {
-        sellExtData.pairs.add(e.token_pair);
-      }
-      duneExtendedData.set(sellAddr, sellExtData);
       
-      // Buy token
-      let buyExtData = duneExtendedData.get(buyAddr) || { 
-        totalAmountUsd: 0, 
-        lastSwapTime: null, 
-        pairs: new Set<string>() 
-      };
-      
-      buyExtData.totalAmountUsd += Number(e.amount_usd) || 0;
-      if (!buyExtData.lastSwapTime || new Date(e.block_time) > new Date(buyExtData.lastSwapTime)) {
-        buyExtData.lastSwapTime = e.block_time;
-      }
-      if (e.token_pair) {
-        buyExtData.pairs.add(e.token_pair);
-      }
-      duneExtendedData.set(buyAddr, buyExtData);
+      console.log('Total unique token addresses from Dune:', grouped.size);
+      lastDuneFetchTime = Date.now();
+    } else {
+      console.log(`Using cached Dune data, last fetched: ${new Date(lastDuneFetchTime).toISOString()}`);
+      console.log(`Next Dune refresh in: ${Math.floor((lastDuneFetchTime + DUNE_REFRESH_INTERVAL - Date.now()) / (60 * 1000))} minutes`);
     }
-
-    console.log('Total unique token addresses from Dune:', grouped.size);
     
     // Get all token addresses
     const addresses = getAllTokenAddresses();
     console.log(`Processing ${addresses.length} tokens`);
     
-    // Fetch prices
+    // Always fetch fresh prices (every 5 minutes)
     const prices = await fetchPrices(addresses);
     lastFetchStatus.dexScreenerTokensCount = Object.keys(prices).length;
 
@@ -304,7 +328,7 @@ async function fetchAndProcessTokenData() {
 }
 
 // Initialize the cache with an immediate fetch
-fetchAndProcessTokenData().then(data => {
+fetchAndProcessTokenData(true).then(data => {
   cachedTokenData = data;
   lastFetchTime = Date.now();
   isCurrentlyLoading = false;
@@ -314,12 +338,12 @@ fetchAndProcessTokenData().then(data => {
   isCurrentlyLoading = false;
 });
 
-// Set up automatic refresh every 5 minutes
+// Set up automatic refresh every 5 minutes for prices
 setInterval(async () => {
   try {
     if (!isCurrentlyLoading) {
-      console.log('Auto refresh: refreshing token data...');
-      cachedTokenData = await fetchAndProcessTokenData();
+      console.log('Auto refresh: refreshing token price data...');
+      cachedTokenData = await fetchAndProcessTokenData(false); // Don't force Dune refresh
       lastFetchTime = Date.now();
       console.log('Auto refresh completed at:', new Date().toISOString());
     } else {
@@ -329,6 +353,22 @@ setInterval(async () => {
     console.error('Auto refresh: error refreshing token data:', error);
   }
 }, CACHE_DURATION);
+
+// Set up automatic refresh every 6 hours for Dune data
+setInterval(async () => {
+  try {
+    if (!isCurrentlyLoading) {
+      console.log('Dune data refresh: fetching fresh Dune data...');
+      cachedTokenData = await fetchAndProcessTokenData(true); // Force Dune refresh
+      lastFetchTime = Date.now();
+      console.log('Dune data refresh completed at:', new Date().toISOString());
+    } else {
+      console.log('Dune data refresh: data refresh already in progress, will try again later');
+    }
+  } catch (error) {
+    console.error('Dune data refresh: error refreshing Dune data:', error);
+  }
+}, DUNE_REFRESH_INTERVAL);
 
 tokensRouter.get('/tokens', async (req, res) => {
   try {
@@ -417,11 +457,18 @@ tokensRouter.get('/tokens', async (req, res) => {
 tokensRouter.get('/tokens/status', async (req, res) => {
   const now = Date.now();
   const cacheAge = now - lastFetchTime;
+  const duneCacheAge = now - lastDuneFetchTime;
   
   const status = {
     last_refresh: new Date(lastFetchTime).toISOString(),
     cache_age_seconds: Math.floor(cacheAge / 1000),
     cache_status: cacheAge < CACHE_DURATION ? 'fresh' : 'stale',
+    dune_data: {
+      last_refresh: new Date(lastDuneFetchTime).toISOString(),
+      cache_age_hours: Math.floor(duneCacheAge / (1000 * 60 * 60)),
+      cache_status: duneCacheAge < DUNE_REFRESH_INTERVAL ? 'fresh' : 'stale',
+      next_refresh_in_minutes: Math.max(0, Math.floor((lastDuneFetchTime + DUNE_REFRESH_INTERVAL - now) / (1000 * 60)))
+    },
     total_tokens: cachedTokenData.length,
     last_fetch: {
       success: lastFetchStatus.success,
@@ -445,6 +492,12 @@ tokensRouter.get('/tokens/status', async (req, res) => {
         enabled: true, 
         priority: 2,
         description: "Fallback source when CoinGecko data is unavailable"
+      },
+      dune: {
+        enabled: true,
+        priority: 3,
+        refresh_interval_hours: DUNE_REFRESH_INTERVAL / (1000 * 60 * 60),
+        description: "Source for swap data, refreshed every 6 hours"
       }
     }
   };
